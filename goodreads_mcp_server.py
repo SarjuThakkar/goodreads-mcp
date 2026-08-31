@@ -206,6 +206,11 @@ def _signed_in(driver) -> bool:
     Raises BlankPage if the document is empty, because "no sign-in link" and
     "no page at all" would otherwise look identical.
     """
+    # The sign-in page has no link TO itself, so the link check below reads
+    # it as authenticated. Being on that URL is proof of the opposite, and
+    # authenticate.py polls this while sitting on exactly that page.
+    if "/user/sign_in" in driver.current_url:
+        return False
     try:
         body = driver.find_element(By.TAG_NAME, "body").text
     except NoSuchElementException as err:
@@ -281,6 +286,8 @@ def _flush_queue(driver) -> tuple[list[str], list[str]]:
                 logger.warning("unknown queued action %r, dropping", item.get("action"))
         except SignedOut:
             # Still signed out: keep this and everything after it untouched.
+            # The caller must say so -- a queue that silently stays put looks
+            # identical to one that was applied.
             remaining.append(item)
         except GoodreadsError as err:
             # A real failure (book not found, say) will never succeed on a

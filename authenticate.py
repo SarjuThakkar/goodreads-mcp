@@ -77,6 +77,17 @@ def main() -> int:
             print(f"  applied  {line}")
         for line in failed:
             print(f"  FAILED   {line}")
+        if not applied and not failed:
+            # Everything bounced back to the queue, which means the session
+            # still isn't good enough to act with. Saying nothing here read
+            # as success and hid a real failure.
+            still = len(g._queue_read())
+            print(
+                f"  NOTHING APPLIED -- all {still} action(s) are still queued.\n"
+                "  The sign-in looked complete but Goodreads still treats this\n"
+                "  browser as signed out. Try signing in again."
+            )
+            return 1
         if failed:
             print(
                 "\nFailures are dropped rather than retried -- a book Goodreads "
