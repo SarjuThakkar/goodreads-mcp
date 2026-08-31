@@ -90,6 +90,13 @@ SHELF_LABELS = {
 SIGNED_OUT_MARKERS = ("sign in", "sign up")
 SIGNED_IN_MARKER = "my books"
 
+# Matches the Chromium actually installed in the image, minus the headless
+# giveaway. See the note in _options().
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/151.0.0.0 Safari/537.36"
+)
+
 PAGE_TIMEOUT = 30
 # Deliberately unhurried. This drives a real site as a real user; there is no
 # voice command that needs to fire faster than this, and hammering Goodreads
@@ -120,6 +127,15 @@ class GoodreadsError(RuntimeError):
     """Something went wrong driving the site."""
 
 
+class BlankPage(GoodreadsError):
+    """Goodreads returned an empty document.
+
+    Distinct from being signed out: an empty page means we never got to
+    ask. Treating it as a session problem would send the user to the
+    touchscreen to fix something a login can't fix.
+    """
+
+
 class SignedOut(GoodreadsError):
     """The saved session is gone. Actions get queued rather than failed."""
 
@@ -147,6 +163,11 @@ def _options(headed: bool = False) -> Options:
     # anything -- the session is a real signed-in user throughout.
     o.add_argument("--disable-blink-features=AutomationControlled")
     o.add_experimental_option("excludeSwitches", ["enable-automation"])
+    # Load-bearing. Headless Chromium's default user agent contains
+    # "HeadlessChrome", and Goodreads serves it a completely empty document --
+    # no title, no body, no error. Without this the page silently comes back
+    # blank and every selector finds nothing.
+    o.add_argument(f"--user-agent={USER_AGENT}")
     return o
 
 
@@ -179,6 +200,14 @@ def _signed_in(driver) -> bool:
         body = driver.find_element(By.TAG_NAME, "body").text.lower()
     except NoSuchElementException:
         return False
+    if not body.strip():
+        # An empty page proves nothing. Reporting "signed in" here was a real
+        # bug: the absence of sign-in links looked like success, so status
+        # claimed everything was fine while nothing worked.
+        raise BlankPage(
+            "Goodreads returned an empty page -- it may be blocking this "
+            "browser, or the network is down"
+        )
     if SIGNED_IN_MARKER in body:
         return True
     return not any(m in body for m in SIGNED_OUT_MARKERS)
