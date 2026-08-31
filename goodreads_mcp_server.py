@@ -129,7 +129,13 @@ class SignedOut(GoodreadsError):
 def _options(headed: bool = False) -> Options:
     o = Options()
     o.binary_location = CHROMIUM
-    if not headed:
+    if headed:
+        # The Pi's desktop is Wayland (labwc). Without this Chromium looks for
+        # an X server and dies with "Missing X server or $DISPLAY" -- it does
+        # not fall back on its own.
+        if os.environ.get("WAYLAND_DISPLAY"):
+            o.add_argument("--ozone-platform=wayland")
+    else:
         o.add_argument("--headless=new")
     o.add_argument(f"--user-data-dir={PROFILE}")
     o.add_argument("--no-sandbox")
@@ -374,6 +380,10 @@ async def goodreads_status() -> str:
 async def search_books(query: str) -> str:
     """Search Goodreads for a book.
 
+    BOOKS ONLY. This searches Goodreads' catalogue of published books. It has
+    nothing to do with the household shopping or to-do lists on the Skylight
+    fridge calendar.
+
     Use this when the user isn't sure of an exact title, or to confirm which
     edition they mean before shelving it.
 
@@ -402,7 +412,13 @@ async def search_books(query: str) -> str:
 
 @mcp.tool
 async def add_to_shelf(book: str, shelf: str = "want to read") -> str:
-    """Put a book on one of your Goodreads shelves.
+    """Put a book on one of your Goodreads reading shelves.
+
+    BOOKS ONLY. Use this whenever the user is talking about a book they want
+    to read, are reading, or have finished -- including phrasings like "add
+    it to my reading list" or "put it on my book list", which mean a Goodreads
+    shelf, not a Skylight list. For groceries, chores, errands or anything
+    else household, use the Skylight list tools instead.
 
     Args:
         book: Title, as the user said it. An author helps for common titles.
@@ -445,7 +461,10 @@ async def add_to_shelf(book: str, shelf: str = "want to read") -> str:
 
 @mcp.tool
 async def list_shelf(shelf: str = "currently reading") -> str:
-    """Read back what's on one of your Goodreads shelves.
+    """Read back the books on one of your Goodreads shelves.
+
+    BOOKS ONLY -- "what am I reading", "what's on my to-read list". For the
+    household shopping or to-do lists, use the Skylight list tools.
 
     Args:
         shelf: "want to read", "currently reading", or "read". Defaults to
