@@ -85,10 +85,15 @@ SHELF_LABELS = {
     "read": "read",
 }
 
-# Goodreads renders signed-out and signed-in headers differently. These are
-# the cheapest reliable discriminators, checked against the real page.
-SIGNED_OUT_MARKERS = ("sign in", "sign up")
-SIGNED_IN_MARKER = "my books"
+# A sign-in link in the header is the reliable tell that we are signed out.
+# Body text is NOT: the signed-out header literally reads "HomeMy Books ...
+# Sign In Join", so matching on "my books" reported a signed-out search page
+# as authenticated.
+SIGN_IN_LINK = 'a[href*="/user/sign_in"]'
+
+# Behind auth. Signed out, Goodreads redirects it to /user/sign_in?returnurl=,
+# which is the definitive session check.
+MY_BOOKS_PATH = "/review/list"
 
 # Matches the Chromium actually installed in the image, minus the headless
 # giveaway. See the note in _options().
@@ -191,35 +196,46 @@ def _go(driver, url: str) -> None:
 
 
 def _signed_in(driver) -> bool:
-    """Is this session still authenticated?
+    """Is the page we're on being served to a signed-in user?
 
-    Reads the page text rather than poking at cookies: a cookie can be
-    present and expired, but the rendered header is the truth.
+    Checks for the header's sign-in link rather than reading body text. A
+    cookie can be present and expired, but the rendered header is the truth --
+    and the text is actively misleading, since the signed-out header contains
+    the words "My Books".
+
+    Raises BlankPage if the document is empty, because "no sign-in link" and
+    "no page at all" would otherwise look identical.
     """
     try:
-        body = driver.find_element(By.TAG_NAME, "body").text.lower()
-    except NoSuchElementException:
-        return False
+        body = driver.find_element(By.TAG_NAME, "body").text
+    except NoSuchElementException as err:
+        raise BlankPage(
+            "Goodreads returned a page with no body -- it may be blocking "
+            "this browser, or the network is down"
+        ) from err
     if not body.strip():
-        # An empty page proves nothing. Reporting "signed in" here was a real
-        # bug: the absence of sign-in links looked like success, so status
-        # claimed everything was fine while nothing worked.
         raise BlankPage(
             "Goodreads returned an empty page -- it may be blocking this "
             "browser, or the network is down"
         )
-    if SIGNED_IN_MARKER in body:
-        return True
-    return not any(m in body for m in SIGNED_OUT_MARKERS)
+    return not driver.find_elements(By.CSS_SELECTOR, SIGN_IN_LINK)
 
 
 def _require_session(driver) -> None:
-    _go(driver, BASE)
-    if not _signed_in(driver):
+    """Confirm the saved session still works, definitively.
+
+    Loads a page that lives behind auth: signed out, Goodreads bounces it to
+    /user/sign_in. That redirect is unambiguous in a way that inspecting a
+    public page's header is not.
+    """
+    _go(driver, f"{BASE}{MY_BOOKS_PATH}")
+    if "/user/sign_in" in driver.current_url:
         raise SignedOut(
             "the saved Goodreads session has expired -- run the authenticate "
             "command on the Pi to sign in again"
         )
+    # Surfaces a blank page as itself rather than as a session problem.
+    _signed_in(driver)
 
 
 # --- the queue ---------------------------------------------------------
@@ -340,8 +356,8 @@ def _shelve(driver, book: str, shelf: str) -> str:
 
 
 def _shelf_contents(driver, shelf: str, limit: int = 15) -> list[str]:
-    _go(driver, f"{BASE}/review/list?shelf={shelf}&per_page=20")
-    if not _signed_in(driver):
+    _go(driver, f"{BASE}{MY_BOOKS_PATH}?shelf={shelf}&per_page=20")
+    if "/user/sign_in" in driver.current_url:
         raise SignedOut("session expired")
     titles = []
     for el in driver.find_elements(By.CSS_SELECTOR, "td.field.title a")[:limit]:
