@@ -1,0 +1,5 @@
+# Pinned to what the working image resolved on 2026-08-31.
+fastmcp==3.4.7
+selenium==4.48.0
+uvicorn==0.52.4
+starlette==1.6.0
