@@ -45,6 +45,7 @@ from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -95,6 +96,18 @@ SIGN_IN_LINK = 'a[href*="/user/sign_in"]'
 # which is the definitive session check.
 MY_BOOKS_PATH = "/review/list"
 
+# The shelf control on a book page. It has no stable class or data-testid --
+# only its aria-label distinguishes it, and that label differs by state:
+#
+#   unshelved  text "Want to Read"  aria "Tap to shelve book as want to read"
+#   shelved    text "Read"          aria "Shelved as 'Read'. Tap to edit shelf..."
+#
+# Clicking it while unshelved shelves as want-to-read immediately; clicking it
+# while shelved opens a dialog listing every shelf.
+BOOK_ACTIONS = ".BookActions button"
+SHELF_ARIA_HINTS = ("tap to shelve", "shelved as")
+SHELF_DIALOG_BUTTON = "[role='dialog'] button, .Overlay button"
+
 # Matches the Chromium actually installed in the image, minus the headless
 # giveaway. See the note in _options().
 USER_AGENT = (
@@ -102,7 +115,7 @@ USER_AGENT = (
     "Chrome/151.0.0.0 Safari/537.36"
 )
 
-PAGE_TIMEOUT = 30
+PAGE_TIMEOUT = 60
 # Deliberately unhurried. This drives a real site as a real user; there is no
 # voice command that needs to fire faster than this, and hammering Goodreads
 # is both rude and the fastest route to being blocked.
@@ -138,6 +151,14 @@ class BlankPage(GoodreadsError):
     Distinct from being signed out: an empty page means we never got to
     ask. Treating it as a session problem would send the user to the
     touchscreen to fix something a login can't fix.
+    """
+
+
+class AlreadyShelved(GoodreadsError):
+    """The book is already on the requested shelf.
+
+    Not a failure, but not an action either -- worth saying plainly rather
+    than clicking through and reporting a change that never happened.
     """
 
 
@@ -310,8 +331,16 @@ def _flush_queue(driver) -> tuple[list[str], list[str]]:
     for item in items:
         try:
             if item.get("action") == "shelve":
-                title = _shelve(driver, item["book"], item["shelf"])
-                applied.append(f"{title} -> {SHELF_LABELS.get(item['shelf'], item['shelf'])}")
+                try:
+                    title = _shelve(driver, item["book"], item["shelf"])
+                    applied.append(
+                        f"{title} -> {SHELF_LABELS.get(item['shelf'], item['shelf'])}"
+                    )
+                except AlreadyShelved as already:
+                    # A no-op, not a failure. It leaves the queue either way,
+                    # but calling it a failure would send someone hunting for
+                    # a problem that doesn't exist.
+                    applied.append(f"{already} (no change needed)")
             else:
                 logger.warning("unknown queued action %r, dropping", item.get("action"))
         except SignedOut:
@@ -347,6 +376,25 @@ def _search(driver, query: str) -> list[dict]:
     return results
 
 
+def _shelf_button(driver):
+    """The book page's shelf control, in either of its two states."""
+    for el in driver.find_elements(By.CSS_SELECTOR, BOOK_ACTIONS):
+        aria = (el.get_attribute("aria-label") or "").lower()
+        if any(h in aria for h in SHELF_ARIA_HINTS):
+            return el
+    return None
+
+
+def _pick_in_dialog(driver, label: str) -> bool:
+    """Click the shelf named `label` in the open shelf dialog."""
+    for el in driver.find_elements(By.CSS_SELECTOR, SHELF_DIALOG_BUTTON):
+        if (el.text or "").strip().lower() == label and el.is_displayed():
+            el.click()
+            time.sleep(POLITE_DELAY)
+            return True
+    return False
+
+
 def _shelve(driver, book: str, shelf: str) -> str:
     """Put a book on a shelf. Returns the title actually shelved."""
     results = _search(driver, book)
@@ -358,35 +406,52 @@ def _shelve(driver, book: str, shelf: str) -> str:
     if not _signed_in(driver):
         raise SignedOut("session expired mid-action")
 
-    # The shelf control is a button plus a dropdown. Clicking the main button
-    # shelves as want-to-read; anything else needs the dropdown opened first.
+    button = _shelf_button(driver)
+    if button is None:
+        raise GoodreadsError(
+            f"couldn't find the shelf control on the page for '{top['title']}' "
+            "-- Goodreads may have changed its markup"
+        )
+
+    want = SHELF_LABELS.get(shelf, shelf).lower()
+    aria = (button.get_attribute("aria-label") or "").lower()
+    current = (button.text or "").strip().lower()
+    unshelved = "tap to shelve" in aria
+
+    if not unshelved and current == want:
+        # Saying "added it" here would be a lie of a quieter kind, so the
+        # caller gets told it was already there.
+        raise AlreadyShelved(f"{top['title']} is already on your {want} shelf")
+
     try:
-        if shelf == "to-read":
-            button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, "button.WantToReadButton, .wtrToRead button")
-                )
-            )
-            button.click()
+        button.click()
+        time.sleep(POLITE_DELAY)
+
+        if unshelved and want == "want to read":
+            # The unshelved button shelves as want-to-read on a single click;
+            # no dialog is involved.
+            pass
         else:
-            WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, "button.WantToReadDropdown, .wtrShelfButton")
+            if unshelved:
+                # That first click shelved it as want-to-read. Re-find the
+                # button -- it has re-rendered into its "shelved" state -- and
+                # open the dialog to move it where it was actually asked to go.
+                button = _shelf_button(driver)
+                if button is None:
+                    raise GoodreadsError("the shelf control vanished after shelving")
+                button.click()
+                time.sleep(POLITE_DELAY)
+            if not _pick_in_dialog(driver, want):
+                raise GoodreadsError(
+                    f"couldn't find a '{want}' option in the shelf dialog for "
+                    f"'{top['title']}'"
                 )
-            ).click()
-            time.sleep(POLITE_DELAY)
-            label = SHELF_LABELS.get(shelf, shelf)
-            option = driver.find_element(
-                By.XPATH,
-                f"//div[@role='menu']//*[contains(translate(text(),"
-                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
-                f"'{label}')]",
-            )
-            option.click()
+        # Leave the dialog closed whether or not one was opened.
+        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
         time.sleep(POLITE_DELAY)
     except (TimeoutException, NoSuchElementException) as err:
         raise GoodreadsError(
-            f"couldn't find the shelf control on the page for '{top['title']}' "
+            f"couldn't operate the shelf control for '{top['title']}' "
             "-- Goodreads may have changed its markup"
         ) from err
     return top["title"]
