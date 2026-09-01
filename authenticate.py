@@ -48,13 +48,35 @@ def main() -> int:
     with g._browser(headed=True) as driver:
         g._go(driver, f"{g.BASE}/user/sign_in")
 
+        # Watch the cookie jar rather than the page. Page state only tells
+        # you about the page: during a "Continue with Amazon" handoff the
+        # browser isn't on goodreads.com at all, so there's no header to read
+        # and every guess from markup is wrong. Cookies are visible across
+        # domains via CDP, so the detour simply doesn't matter.
+        baseline = g._goodreads_cookie_names(driver)
+        print(f"  watching {len(baseline)} signed-out cookies for a change...")
+
         deadline = time.time() + WAIT_SECONDS
         signed_in = False
+        announced_offsite = False
         while time.time() < deadline:
             try:
-                if g._signed_in(driver):
-                    signed_in = True
-                    break
+                fresh = g._goodreads_cookie_names(driver) - baseline
+                if not g._on_goodreads(driver):
+                    # Mid federated login. Say so once, decide nothing, and
+                    # above all don't navigate -- that would abandon the flow.
+                    if not announced_offsite:
+                        print("  federated login in progress, waiting...", flush=True)
+                        announced_offsite = True
+                elif fresh and "/user/sign_in" not in driver.current_url:
+                    # A new cookie is only a hint. Prove it by loading a page
+                    # that lives behind auth and seeing whether it bounces.
+                    print(f"  new cookie(s): {', '.join(sorted(fresh))} -- verifying", flush=True)
+                    g._go(driver, f"{g.BASE}{g.MY_BOOKS_PATH}")
+                    if "/user/sign_in" not in driver.current_url:
+                        signed_in = True
+                        break
+                    baseline |= fresh  # not it; stop re-checking this one
             except Exception:  # noqa: BLE001 - the window may be mid-navigation
                 pass
             remaining = int(deadline - time.time())

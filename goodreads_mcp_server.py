@@ -195,6 +195,31 @@ def _go(driver, url: str) -> None:
     time.sleep(POLITE_DELAY)
 
 
+def _goodreads_cookie_names(driver) -> set[str]:
+    """Names of every goodreads.com cookie, whatever page is showing.
+
+    Uses CDP rather than driver.get_cookies(), which only returns cookies
+    for the current domain -- useless during an Amazon or Apple login, when
+    the browser isn't on goodreads.com at all.
+    """
+    try:
+        jar = driver.execute_cdp_cmd("Network.getAllCookies", {}).get("cookies", [])
+    except Exception:  # noqa: BLE001 - CDP is a convenience, never fatal
+        return set()
+    return {c["name"] for c in jar if "goodreads" in c.get("domain", "")}
+
+
+def _on_goodreads(driver) -> bool:
+    """Are we still on Goodreads, or off in a federated login?
+
+    Signing in with Amazon or Apple sends the browser to another domain
+    entirely. Nothing about the session can be judged from those pages --
+    they have no Goodreads header, no Goodreads sign-in link, and looking
+    for the absence of one there reads as success.
+    """
+    return "goodreads.com" in (driver.current_url or "")
+
+
 def _signed_in(driver) -> bool:
     """Is the page we're on being served to a signed-in user?
 
@@ -206,6 +231,11 @@ def _signed_in(driver) -> bool:
     Raises BlankPage if the document is empty, because "no sign-in link" and
     "no page at all" would otherwise look identical.
     """
+    # Off-domain (an Amazon or Apple login) tells us nothing at all, and
+    # "no Goodreads sign-in link on amazon.com" is trivially true -- which
+    # declared success in the middle of an OAuth handoff.
+    if not _on_goodreads(driver):
+        return False
     # The sign-in page has no link TO itself, so the link check below reads
     # it as authenticated. Being on that URL is proof of the opposite, and
     # authenticate.py polls this while sitting on exactly that page.
